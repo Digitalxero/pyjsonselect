@@ -31,25 +31,6 @@ import json
 import re
 import sys
 
-PY3 = sys.version_info[0] == 3
-
-
-if PY3:
-    stringtype=str
-    
-    def iteritems(d):
-        return d.items()
-        
-    def iterkeys(d):
-        return d.keys()
-else:
-    stringtype=basestring
-
-    def iteritems(d):
-        return d.iteritems()
-    def iterkeys(d):
-        return d.iterkeys()
-
 
 def jsonParse(string):
     return json.loads(string)
@@ -69,7 +50,6 @@ errorCodes = {
     "pex":  "opening paren expected '('",
     "se":   "selector expected",
     "sex":  "string expected",
-    "snex": "string or number expected",
     "sra":  "string required after '.'",
     "uc":   "unrecognized char",
     "ucp":  "unexpected closing paren",
@@ -94,7 +74,6 @@ class toks(object):
     typ=3  # type
     str=4  # string
     ide=5  # identifiers (or "classes", stuff after a dot)
-    num=6  # numbers
 
 
 # The primary lexing regular expression in jsonselect
@@ -109,7 +88,7 @@ pat = re.compile(
     # (4) pseudo classes
     "(:(?:root|first-child|last-child|only-child))|" +
     # (5) pseudo functions
-    "(:(?:nth-child|nth-last-child|has|expr|val|contains))|" +
+    "(:(?:nth-child|nth-last-child|has|expr|val|contains|re-val))|" +
     # (6) bogusly named pseudo something or others
     "(:\\w+)|" +
     # (7 & 8) identifiers and JSON strings
@@ -117,9 +96,7 @@ pat = re.compile(
     # (8) bogus JSON strings missing a trailing quote
     "(\\\")|" +
     # (9) identifiers (unquoted)
-    "\\.((?:[_a-zA-Z]|[^" + u'\u0000-\u007f' + "]|\\\\[^\\r\\n\\f0-9a-fA-F])(?:[\\$_a-zA-Z0-9\\-]|[^" + u'\u0000-\u007f' + "]|(?:\\\\[^\\r\\n\\f0-9a-fA-F]))*)|" +
-    # (10) numbers
-    "(-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)"
+    "\\.((?:[_a-zA-Z]|[^" + ur'\u0000-\u007f' + "]|\\\\[^\\r\\n\\f0-9a-fA-F])(?:[\\$_a-zA-Z0-9\\-]|[^" + ur'\u0000-\u007f' + "]|(?:\\\\[^\\r\\n\\f0-9a-fA-F]))*)" +
     ")"
 )
 
@@ -143,7 +120,7 @@ def _jsTypeof(o):
         return 'number'
     elif isinstance(o, list) or isinstance(o, dict):
         return 'object'
-    elif isinstance(o, stringtype):
+    elif isinstance(o, basestring):
         return 'string'
     raise ValueError('Unknown type for object %s (%s)' % (o, type(o)))
 
@@ -165,7 +142,6 @@ def lex(string, off=None):
     elif m[8]: a = [off, toks.ide if m[7] else toks.str, jsonParse(m[8])]
     elif m[9]: te("ujs", string)
     elif m[10]: a = [off, toks.ide, re.sub(r'\\([^\r\n\f0-9a-fA-F])', r'\1', m[10])]
-    elif m[11]: a = [off, toks.num, jsonParse(m[11])]
     return a
 
 
@@ -201,6 +177,7 @@ def num_wrap(op):
             return float('nan')
     return wrap
 
+
 operators = {
     '*':  [ 9, num_wrap(lambda lhs, rhs: lhs * rhs) ],
     '/':  [ 9, num_wrap(lambda lhs, rhs: lhs / rhs) ],
@@ -212,12 +189,19 @@ operators = {
     '$=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.rfind(rhs) == len(lhs) - len(rhs) ],
     '^=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.find(rhs) == 0 ],
     '*=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.find(rhs) != -1 ],
+    '~=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and re.compile(rhs, re.I).search(lhs) is not None],
     '>':  [ 5, lambda lhs, rhs: ist(lhs, 'number') and ist(rhs, 'number') and lhs > rhs or ist(lhs, 'string') and ist(rhs, 'string') and lhs > rhs ],
     '<':  [ 5, lambda lhs, rhs: ist(lhs, 'number') and ist(rhs, 'number') and lhs < rhs or ist(lhs, 'string') and ist(rhs, 'string') and lhs < rhs ],
     '=':  [ 3, lambda lhs, rhs: lhs == rhs ],
     '!=': [ 3, lambda lhs, rhs: lhs != rhs ],
     '&&': [ 2, lambda lhs, rhs: lhs and rhs ],
     '||': [ 1, lambda lhs, rhs: lhs or rhs ]
+}
+
+pseudo_func_to_op = {
+    ':val': "=",
+    ':contains': '*=',
+    ':re-val': '~='
 }
 
 
@@ -376,7 +360,7 @@ def normalizeOne(sel):
                 at = i - 3 if sel[i-2] == '>' else i-2
                 s = sel[:at]
                 z = {}
-                for k in iterkeys(sel[at]):
+                for k in sel[at].iterkeys():
                     if k in sel[at]:
                         z[k] = sel[at][k]
                 if not z.get('has'):
@@ -459,8 +443,9 @@ def parse_selector(string, off, hints):
             else:
                 s['pc'] = l[2]
         elif l[1] == toks.psf:
-            if l[2] == ":val" or l[2] == ":contains":
-                s['expr'] = [ Undefined, '=' if l[2] == ":val" else "*=", Undefined]
+            if l[2] in pseudo_func_to_op.keys():
+                comp = pseudo_func_to_op.get(l[2])
+                s['expr'] = [ Undefined, comp, Undefined]
                 # any amount of whitespace, followed by paren, string, paren
                 off = l[0]
                 l = lex(string, off)
@@ -474,8 +459,8 @@ def parse_selector(string, off, hints):
                 if l and l[1] == " ":
                     off = l[0]
                     l = lex(string, off)
-                if not l or (l[1] != toks.str and l[1] != toks.num):
-                    te("snex", string)
+                if not l or l[1] != toks.str:
+                    te("sex", string)
                 s['expr'][2] = l[2]
                 off = l[0]
                 l = lex(string, off)
@@ -577,7 +562,7 @@ def mn(node, sel, Id, num, tot):
     if m and cs.get('has'):
         for el in cs['has']:
             try:
-                next(_forEach(el, node))
+                _forEach(el, node).next()
                 continue
             except StopIteration:
                 pass
@@ -634,7 +619,7 @@ def _forEach(sel, obj, Id=None, num=None, tot=None, bailout_fn=None):
                         yield o
             else:
                 if obj:
-                    for k, v in iteritems(obj):
+                    for k, v in obj.iteritems():
                         iterator = _forEach(a0, v, Id=k, bailout_fn=bailout_fn)
                         for o in iterator:
                             yield o
@@ -646,7 +631,7 @@ def _forEach(sel, obj, Id=None, num=None, tot=None, bailout_fn=None):
 def interpolate(sel, arr):
     while '?' in sel:
         s = arr[0]
-        if isinstance(s, stringtype):
+        if isinstance(s, basestring):
             s = json.dumps(s)
         sel = sel.sub(r'\?', s, sel)
         arr = arr[1:]

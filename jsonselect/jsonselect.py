@@ -36,10 +36,10 @@ PY3 = sys.version_info[0] == 3
 
 if PY3:
     stringtype=str
-    
+
     def iteritems(d):
         return d.items()
-        
+
     def iterkeys(d):
         return d.keys()
 else:
@@ -109,7 +109,7 @@ pat = re.compile(
     # (4) pseudo classes
     "(:(?:root|first-child|last-child|only-child))|" +
     # (5) pseudo functions
-    "(:(?:nth-child|nth-last-child|has|expr|val|contains))|" +
+    "(:(?:nth-child|nth-last-child|has|expr|val|contains|re-val))|" +
     # (6) bogusly named pseudo something or others
     "(:\\w+)|" +
     # (7 & 8) identifiers and JSON strings
@@ -212,12 +212,19 @@ operators = {
     '$=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.rfind(rhs) == len(lhs) - len(rhs) ],
     '^=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.find(rhs) == 0 ],
     '*=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and lhs.find(rhs) != -1 ],
+    '~=': [ 5, lambda lhs, rhs: ist(lhs, 'string') and ist(rhs, 'string') and re.compile(rhs, re.I).search(lhs) is not None],
     '>':  [ 5, lambda lhs, rhs: ist(lhs, 'number') and ist(rhs, 'number') and lhs > rhs or ist(lhs, 'string') and ist(rhs, 'string') and lhs > rhs ],
     '<':  [ 5, lambda lhs, rhs: ist(lhs, 'number') and ist(rhs, 'number') and lhs < rhs or ist(lhs, 'string') and ist(rhs, 'string') and lhs < rhs ],
     '=':  [ 3, lambda lhs, rhs: lhs == rhs ],
     '!=': [ 3, lambda lhs, rhs: lhs != rhs ],
     '&&': [ 2, lambda lhs, rhs: lhs and rhs ],
     '||': [ 1, lambda lhs, rhs: lhs or rhs ]
+}
+
+pseudo_func_to_op = {
+    ':val': "=",
+    ':contains': '*=',
+    ':re-val': '~='
 }
 
 
@@ -459,8 +466,9 @@ def parse_selector(string, off, hints):
             else:
                 s['pc'] = l[2]
         elif l[1] == toks.psf:
-            if l[2] == ":val" or l[2] == ":contains":
-                s['expr'] = [ Undefined, '=' if l[2] == ":val" else "*=", Undefined]
+            if l[2] in iterkeys(pseudo_func_to_op):
+                comp = pseudo_func_to_op.get(l[2])
+                s['expr'] = [ Undefined, comp, Undefined]
                 # any amount of whitespace, followed by paren, string, paren
                 off = l[0]
                 l = lex(string, off)

@@ -1,0 +1,1 @@
+.items > .item:re-val("\d+:\d+")
